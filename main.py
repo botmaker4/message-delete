@@ -70,10 +70,12 @@ async def execute(settings: Settings, db: ProgressDB, args: argparse.Namespace) 
     import discord  # imported only for an authenticated execution
     client = discord.Client()
     completed = False
+    ready = asyncio.Event()
 
     @client.event
     async def on_ready() -> None:
         nonlocal completed
+        ready.set()
         if completed: return
         completed = True
         if client.user is None or int(client.user.id) != settings.expected_account_id:
@@ -82,6 +84,7 @@ async def execute(settings: Settings, db: ProgressDB, args: argparse.Namespace) 
         runner = DeletionRunner(client, db, account_id=int(client.user.id), delay=settings.delete_delay,
                                 max_retries=settings.max_retries, concurrency=settings.max_concurrent)
         label = f"{client.user} ({client.user.id})"
+        console.print(f"Authenticated as {label}. Starting {len(items):,} pending records.")
         dashboard = Dashboard(db, "EXECUTE", label, settings.delete_delay, runner.pacer, settings.max_concurrent)
         runner.dashboard = dashboard
         loop = asyncio.get_running_loop()
@@ -95,6 +98,15 @@ async def execute(settings: Settings, db: ProgressDB, args: argparse.Namespace) 
         finally:
             await client.close()
 
+    async def ready_watchdog() -> None:
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=90)
+        except TimeoutError:
+            console.print("Discord gateway did not become ready within 90 seconds. Check the token, outbound network access, and Discord account session.")
+            await client.close()
+
+    console.print(f"Connecting to Discord; {len(items):,} pending records selected...")
+    watchdog = asyncio.create_task(ready_watchdog())
     try:
         try:
             await client.start(settings.token)
@@ -105,6 +117,8 @@ async def execute(settings: Settings, db: ProgressDB, args: argparse.Namespace) 
                 raise RuntimeError("Discord authentication/session was rejected; processing stopped") from exc
             raise
     finally:
+        watchdog.cancel()
+        await asyncio.gather(watchdog, return_exceptions=True)
         if not client.is_closed(): await client.close()
 
 

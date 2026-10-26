@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from rich.console import Group
+from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn
@@ -25,12 +25,18 @@ class Dashboard:
     deleted_start: int = 0
     pending_start: int = 0
     _live: Live | None = field(default=None, init=False)
+    _console: Console = field(default_factory=Console, init=False)
+    _last_plain_update: float = field(default=0.0, init=False)
 
     def __enter__(self) -> "Dashboard":
         self.deleted_start = self.db.stats()["deleted"]
         self.pending_start = self.db.stats()["pending"]
-        self._live = Live(self.render(), refresh_per_second=2)
-        self._live.__enter__(); return self
+        if self._console.is_terminal:
+            self._live = Live(self.render(), refresh_per_second=2, console=self._console)
+            self._live.__enter__()
+        else:
+            self._print_plain()
+        return self
 
     def __exit__(self, *args: object) -> None:
         if self._live: self._live.__exit__(*args)
@@ -39,13 +45,33 @@ class Dashboard:
         if item:
             self.channel_id = item.channel_id; self.channel_type = item.channel_type
         if status: self.current_status = status
-        if self._live: self._live.update(self.render())
+        if self._live:
+            self._live.update(self.render())
+        elif time.monotonic() - self._last_plain_update >= 15:
+            self._print_plain()
 
-    def render(self) -> Panel:
-        stats = self.db.stats(); elapsed = max(0.001, time.monotonic() - self.started)
+    def _metrics(self) -> tuple[dict[str, int], float, float]:
+        stats = self.db.stats()
+        elapsed = max(0.001, time.monotonic() - self.started)
         processed = max(0, self.pending_start - stats["pending"])
         rate = processed / elapsed
-        eta_seconds = stats["pending"] / rate if rate > 0 else stats["pending"] * self.delay / max(1, self.concurrency)
+        eta = stats["pending"] / rate if rate > 0 else stats["pending"] * self.delay / max(1, self.concurrency)
+        return stats, elapsed, eta
+
+    def _print_plain(self) -> None:
+        stats, elapsed, eta = self._metrics()
+        self._last_plain_update = time.monotonic()
+        self._console.print(
+            "PROGRESS "
+            f"deleted={stats['deleted']:,} missing={stats['already_missing']:,} "
+            f"inaccessible={stats['inaccessible']:,} failed={stats['failed']:,} "
+            f"pending={stats['pending']:,} channel={self.channel_id or '-'} "
+            f"elapsed={_duration(elapsed)} eta={_duration(eta)}",
+            highlight=False,
+        )
+
+    def render(self) -> Panel:
+        stats, elapsed, eta_seconds = self._metrics()
         table = Table.grid(padding=(0, 2)); table.add_column(style="bold cyan"); table.add_column(justify="right")
         for label, key in (("Total Exported", "total"), ("Deleted", "deleted"),
                            ("Already Missing", "already_missing"), ("Inaccessible", "inaccessible"),
@@ -63,7 +89,7 @@ class Dashboard:
         channel_progress = Progress(TextColumn("Channel"), BarColumn(), TextColumn("{task.completed:,}/{task.total:,}"))
         done, total = self.db.channel_stats(self.channel_id) if self.channel_id else (0, 0)
         channel_progress.add_task("channel", total=max(1, total), completed=done)
-        return Panel(Group(table, progress, channel_progress), title="DISCORD MESSAGE CLEANER", subtitle=f"{self.account} • {self.mode}")
+        return Panel(Group(table, progress, channel_progress), title="DISCORD MESSAGE CLEANER", subtitle=f"{self.account} - {self.mode}")
 
 
 def _duration(seconds: float) -> str:
