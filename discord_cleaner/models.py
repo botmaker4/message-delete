@@ -24,3 +24,14 @@ class WorkItem:
     channel_type: str
     guild_id: int | None
     attempts: int
+
+
+@dataclass(slots=True)
+class ChannelWorkload:
+    channel_id: int
+    channel_type: str
+    guild_id: int | None
+    pending_count: int
+    accessibility_status: str
+    success_count: int
+    failure_count: int

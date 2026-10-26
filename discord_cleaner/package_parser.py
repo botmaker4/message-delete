@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import zipfile
 from collections.abc import Iterator
@@ -47,6 +48,21 @@ class DataPackage(AbstractContextManager["DataPackage"]):
     def close(self) -> None:
         if self._zip is not None:
             self._zip.close()
+
+    def fingerprint(self) -> str:
+        """Return a stable local fingerprint used to bind an import to an account."""
+        digest = hashlib.sha256()
+        if self.source.is_file():
+            with self.source.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        for path in sorted(self._root.rglob("*.json")):
+            digest.update(path.relative_to(self._root).as_posix().encode())
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
 
     def __exit__(self, *args: object) -> None:
         self.close()
@@ -107,3 +123,25 @@ class DataPackage(AbstractContextManager["DataPackage"]):
                     continue
                 seen.add(key)
                 yield ExportedMessage(channel_id, message_id, kind, guild_id, label)
+
+    def ownership_evidence(self, account_id: int) -> tuple[bool, str]:
+        """Validate account evidence present in official DM recipient metadata.
+
+        Message rows do not contain authors, so this is provenance evidence rather
+        than a cryptographic guarantee. Packages without evidence must use fetch mode.
+        """
+        evidenced = 0; mismatches = 0
+        for dirname in self._channel_dirs():
+            channel = self._json(f"{dirname}/channel.json")
+            if not isinstance(channel, dict) or str(channel.get("type", "")).upper() not in {"DM", "GROUP_DM"}:
+                continue
+            recipients = channel.get("recipients")
+            numeric = {int(value) for value in recipients or [] if str(value).isdigit()}
+            if numeric:
+                evidenced += 1
+                if account_id not in numeric: mismatches += 1
+        if mismatches:
+            return False, f"{mismatches} DM/group channel recipient lists do not contain EXPECTED_ACCOUNT_ID"
+        if not evidenced:
+            return False, "package has no numeric DM/group recipient evidence; use VERIFICATION_MODE=fetch"
+        return True, f"EXPECTED_ACCOUNT_ID appears consistently in {evidenced} DM/group recipient lists"

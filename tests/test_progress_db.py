@@ -37,3 +37,32 @@ def test_channel_wide_inaccessible_is_bulk_and_resumable(tmp_path):
             "SELECT SUM(attempt_count) FROM messages WHERE channel_id=123456"
         ).fetchone()[0]
         assert attempts == 1
+
+
+def test_v1_migration_preserves_progress_and_labels_old_inaccessible(tmp_path):
+    import sqlite3
+    path=tmp_path/"legacy.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE messages(channel_id INTEGER,message_id INTEGER,channel_type TEXT,guild_id INTEGER,
+            label TEXT,status TEXT,attempt_count INTEGER,last_error TEXT,last_attempt_at TEXT,deleted_at TEXT,
+            PRIMARY KEY(channel_id,message_id))""")
+        conn.execute("INSERT INTO messages VALUES(123456,777777,'DM',NULL,'','deleted',1,NULL,NULL,'now')")
+        conn.execute("INSERT INTO messages VALUES(123456,888888,'DM',NULL,'','inaccessible',1,'old 403',NULL,NULL)")
+    with ProgressDB(path) as db:
+        assert db.stats()["deleted"] == 1
+        assert db.stats()["unverified_inaccessible"] == 1
+        assert db.connection.execute("SELECT accessibility_status FROM channels").fetchone()[0] == "needs_recheck"
+    assert list(tmp_path.glob("legacy.sqlite3.backup-*"))
+
+
+def test_batched_commits_and_interrupted_resume(tmp_path):
+    path=tmp_path/"batch.sqlite3"
+    records=[ExportedMessage(123456,700000+n,"DM") for n in range(100)]
+    with ProgressDB(path,commit_batch_size=25) as db:
+        db.import_records(records); before=db.commit_count
+        for item in db.select_work()[:30]: db.record(item,"deleted")
+        db.flush()
+        assert db.commit_count-before == 2
+    with ProgressDB(path) as db:
+        assert db.stats()["deleted"] == 30
+        assert len(db.select_work()) == 70

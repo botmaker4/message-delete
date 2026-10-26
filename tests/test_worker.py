@@ -14,9 +14,11 @@ class HTTPError(Exception):
 
 class DB:
     def __init__(self): self.rows=[]
-    def record(self, item, status, error=None): self.rows.append((status,error))
-    def mark_channel_inaccessible(self, item, error):
-        self.rows.append(("inaccessible", error)); return 1
+    def record(self, item, status, error=None, **evidence): self.rows.append((status,error,evidence))
+    def mark_channel(self, item, channel_status, message_status, error, **evidence):
+        self.rows.append((message_status,error,evidence)); return 100
+    def update_channel_probe(self, *args, **kwargs): pass
+    def flush(self): pass
 
 
 class Message:
@@ -38,6 +40,19 @@ class Client:
     def __init__(self, channel): self.channel=channel
     def get_channel(self, _): return self.channel
     async def fetch_channel(self, _): return self.channel
+
+    def get_partial_messageable(self, channel_id, **kwargs):
+        return PartialChannel(self.channel.message)
+
+
+class PartialChannel:
+    def __init__(self,message): self.message=message
+    def get_partial_message(self,_): return self.message
+
+
+class ProbeFailureClient(Client):
+    def __init__(self, channel, probe_error): super().__init__(channel); self.probe_error=probe_error
+    async def fetch_channel(self, _): raise self.probe_error
 
 
 def item(): return WorkItem(123456, 777777, "DM", None, 0)
@@ -67,13 +82,31 @@ async def test_author_must_match():
 
 
 @pytest.mark.asyncio
-async def test_one_403_short_circuits_the_entire_channel():
+async def test_one_confirmed_channel_403_short_circuits_the_entire_channel():
     channel = Channel(error=HTTPError(403)); db = DB()
     items = [WorkItem(123456, 700000 + number, "DM", None, 0) for number in range(100)]
-    runner = DeletionRunner(Client(channel), db, account_id=42, delay=0, max_retries=2, concurrency=1)
+    runner = DeletionRunner(ProbeFailureClient(channel,HTTPError(403)), db, account_id=42, delay=0, max_retries=2,concurrency=1)
     await runner.run(items)
     assert channel.calls == 1
     assert len(db.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_message_403_does_not_bulk_mark_channel():
+    channel=Channel(error=HTTPError(403)); db=DB(); items=[WorkItem(123456,700000+n,"DM",None,0) for n in range(3)]
+    await DeletionRunner(Client(channel),db,account_id=42,delay=0,max_retries=1,concurrency=1).run(items)
+    assert channel.calls == 3
+    assert [row[0] for row in db.rows] == ["inaccessible"]*3
+
+
+@pytest.mark.asyncio
+async def test_direct_mode_uses_one_delete_without_fetch():
+    message=Message(); channel=Channel(message); db=DB()
+    runner=DeletionRunner(Client(channel),db,account_id=42,delay=0,max_retries=1,concurrency=1,verification_mode="direct")
+    await runner.run([item()])
+    assert message.deleted == 1
+    assert channel.calls == 0
+    assert runner.metrics.api_requests == 1
 
 
 def test_no_unrelated_destructive_calls_exist():
@@ -81,6 +114,8 @@ def test_no_unrelated_destructive_calls_exist():
     source="\n".join(p.read_text(encoding="utf-8") for p in pathlib.Path("discord_cleaner").glob("*.py"))
     forbidden=("guild.leave(", ".delete_channel(", ".create_guild(", ".leave_group(", ".close_dm(")
     assert not any(term in source for term in forbidden)
+    from discord_cleaner.deletion_worker import DISCORD_OPERATION_ALLOWLIST
+    assert DISCORD_OPERATION_ALLOWLIST == {"fetch_channel","fetch_message","delete"}
 
 
 def test_eta_duration_formatting():

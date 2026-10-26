@@ -43,3 +43,11 @@ def test_extracted_messages_directory(tmp_path):
     (channel / "channel.json").write_text('{"id":"123456","type":"DM"}', encoding="utf-8")
     (channel / "messages.json").write_text('[{"ID":"777777"}]', encoding="utf-8")
     with DataPackage(root) as package: assert len(list(package.records())) == 1
+
+
+def test_package_ownership_evidence(tmp_path):
+    path=make_package(tmp_path,[{"ID":"777777"}],{"id":"123456","type":"DM","recipients":["42","99"]})
+    with DataPackage(path) as package:
+        assert package.ownership_evidence(42)[0] is True
+        verified,reason=package.ownership_evidence(100)
+        assert verified is False and "do not contain" in reason
