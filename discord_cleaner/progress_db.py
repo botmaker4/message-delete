@@ -46,7 +46,8 @@ class ProgressDB:
                 failure_count INTEGER NOT NULL DEFAULT 0,last_http_status INTEGER,last_discord_code INTEGER,
                 last_stage TEXT,last_reason TEXT);
             CREATE TABLE IF NOT EXISTS package_imports (
-                fingerprint TEXT PRIMARY KEY,account_id INTEGER,verified INTEGER NOT NULL DEFAULT 0,imported_at TEXT NOT NULL);
+                fingerprint TEXT PRIMARY KEY,account_id INTEGER,verified INTEGER NOT NULL DEFAULT 0,
+                imported_at TEXT NOT NULL,indexed_count INTEGER);
             CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
         """)
         if has_messages:
@@ -56,6 +57,9 @@ class ProgressDB:
             self.connection.execute("INSERT OR IGNORE INTO channels(channel_id,channel_type,guild_id) SELECT channel_id,MIN(channel_type),MIN(guild_id) FROM messages GROUP BY channel_id")
             self.connection.execute("""UPDATE channels SET accessibility_status='needs_recheck' WHERE channel_id IN
                 (SELECT DISTINCT channel_id FROM messages WHERE status='inaccessible' AND classification_source='historical_unverified')""")
+        import_columns={row[1] for row in self.connection.execute("PRAGMA table_info(package_imports)")}
+        if "indexed_count" not in import_columns:
+            self.connection.execute("ALTER TABLE package_imports ADD COLUMN indexed_count INTEGER")
         self.connection.executescript("""
             CREATE INDEX IF NOT EXISTS ix_messages_status_channel ON messages(status,channel_id);
             CREATE INDEX IF NOT EXISTS ix_messages_channel_status ON messages(channel_id,status,message_id);
@@ -85,12 +89,29 @@ class ProgressDB:
         self.connection.commit(); self.commit_count+=1
         return count,message_changes
 
-    def register_package(self,fingerprint:str,account_id:int|None,verified:bool)->None:
-        self.connection.execute("INSERT OR REPLACE INTO package_imports VALUES(?,?,?,?)",(fingerprint,account_id,int(verified),_now())); self.connection.commit(); self.commit_count+=1
+    def register_package(self,fingerprint:str,account_id:int|None,verified:bool,indexed_count:int|None=None)->None:
+        self.connection.execute("""INSERT INTO package_imports(fingerprint,account_id,verified,imported_at,indexed_count)
+            VALUES(?,?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET account_id=excluded.account_id,
+            verified=excluded.verified,imported_at=excluded.imported_at,
+            indexed_count=COALESCE(excluded.indexed_count,package_imports.indexed_count)""",
+            (fingerprint,account_id,int(verified),_now(),indexed_count)); self.connection.commit(); self.commit_count+=1
     def package_verified_for(self,account_id:int,fingerprint:str|None=None)->bool:
         if fingerprint is None:
             return self.connection.execute("SELECT 1 FROM package_imports WHERE account_id=? AND verified=1 LIMIT 1",(account_id,)).fetchone() is not None
         return self.connection.execute("SELECT 1 FROM package_imports WHERE account_id=? AND fingerprint=? AND verified=1 LIMIT 1",(account_id,fingerprint)).fetchone() is not None
+
+    def indexed_package_count(self,fingerprint:str)->int|None:
+        row=self.connection.execute("SELECT indexed_count FROM package_imports WHERE fingerprint=?",(fingerprint,)).fetchone()
+        if row is None or row[0] is None: return None
+        actual=self.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        return int(row[0]) if actual>=int(row[0]) else None
+
+    def startup_metrics(self)->dict[str,float|int]:
+        stats=self.stats()
+        recent_5=self.connection.execute("SELECT COUNT(*) FROM messages WHERE status='deleted' AND julianday(deleted_at)>=julianday('now','-5 minutes')").fetchone()[0]
+        recent_30=self.connection.execute("SELECT COUNT(*) FROM messages WHERE status='deleted' AND julianday(deleted_at)>=julianday('now','-30 minutes')").fetchone()[0]
+        recorded_429=self.connection.execute("SELECT COUNT(*) FROM messages WHERE http_status=429").fetchone()[0]
+        return {**stats,"recent_5m_per_min":recent_5/5,"recent_30m_per_min":recent_30/30,"recorded_429":recorded_429}
 
     def _filters(self,channel_id,channel_types,exclude_channels,exclude_guilds,alias="m."):
         clauses=[]; params=[]

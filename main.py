@@ -88,6 +88,38 @@ def show_diagnosis(db: ProgressDB) -> None:
     console.print(top)
 
 
+def show_startup_report(db: ProgressDB,settings: Settings)->None:
+    metrics=db.startup_metrics(); table=Table(title="Startup database report")
+    table.add_column("Metric"); table.add_column("Value",justify="right")
+    rows=(
+        ("Total exported",metrics["total"]),("Successfully deleted",metrics["deleted"]),
+        ("Pending",metrics["pending"]),("Confirmed inaccessible",metrics["confirmed_inaccessible"]),
+        ("Historically unverified inaccessible",metrics["unverified_inaccessible"]),
+        ("Already missing",metrics["already_missing"]),("Failed",metrics["failed"]),
+        ("Channels remaining",metrics["active_channels"]),
+        ("Current run deletes/min","0.00 (not started)"),
+        ("Recent deletes/min (5m)",f"{metrics['recent_5m_per_min']:.2f}"),
+        ("Recent deletes/min (30m)",f"{metrics['recent_30m_per_min']:.2f}"),
+        ("Recorded terminal HTTP 429 rows",metrics["recorded_429"]),
+        ("Application minimum delay",f"{settings.delete_delay:.2f}s"),
+        ("Concurrency",settings.max_concurrent),
+    )
+    for label,value in rows: table.add_row(label,f"{value:,}" if isinstance(value,int) else str(value))
+    console.print(table)
+    console.print("Rate limits: discord.py-self route/global buckets remain authoritative; surfaced 429 Retry-After values are honored.")
+
+
+def selected_mode(args: argparse.Namespace,settings: Settings)->str:
+    for attribute,mode in (
+        ("scan","scan"),("retry_failed","retry_failed"),("stats","stats"),
+        ("diagnose","diagnose"),("audit_inaccessible","audit"),
+        ("recheck_inaccessible","recheck"),("authorize_inaccessible_retry","authorize"),
+    ):
+        if getattr(args,attribute,False): return mode
+    if args.resume: return "execute"
+    return settings.cleaner_mode
+
+
 def verify_self_library() -> None:
     try: version = importlib.metadata.version("discord.py-self")
     except importlib.metadata.PackageNotFoundError as exc:
@@ -211,31 +243,43 @@ def main() -> int:
     except ValueError as exc: console.print(f"[red]Configuration error:[/red] {exc}"); return 2
     try:
         with ProgressDB(settings.database_path) as db:
-            if args.scan:
+            mode=selected_mode(args,settings)
+            console.print(f"Cleaner mode: {mode}")
+            if mode=="scan":
                 with DataPackage(settings.messages_path) as package:
                     fingerprint=package.fingerprint()
                     found, added = db.import_records(package.records())
-                db.register_package(fingerprint,settings.expected_account_id,False)
+                db.register_package(fingerprint,settings.expected_account_id,False,found)
                 console.print(f"Scanned {found:,} unique records; added {added:,} new records."); show_stats(db); return 0
-            if args.retry_failed:
+            if mode=="retry_failed":
                 console.print(f"Returned {db.retry_failed():,} failed records to pending."); return 0
-            if args.stats:
+            if mode=="stats":
                 show_stats(db); return 0
-            if args.diagnose:
+            if mode=="diagnose":
                 show_diagnosis(db); return 0
-            if args.audit_inaccessible:
+            if mode=="audit":
                 show_audit(db); return 0
-            if args.recheck_inaccessible:
+            if mode=="recheck":
                 asyncio.run(recheck_inaccessible(settings,db)); show_audit(db); return 0
-            if args.authorize_inaccessible_retry:
+            if mode=="authorize":
                 console.print(f"Reset {db.apply_rechecked_channels():,} historical rows from channels proven accessible."); return 0
-            # Normal mode: refresh the database from the package, then process all pending rows.
+            # Execute mode fingerprints first and only reparses an unindexed package.
             with DataPackage(settings.messages_path) as package:
                 fingerprint=package.fingerprint()
-                provenance_verified,provenance_reason=package.ownership_evidence(settings.expected_account_id) if settings.expected_account_id else (False,"EXPECTED_ACCOUNT_ID is unset")
-                found, added = db.import_records(package.records())
-            console.print(f"Scanned {found:,} unique records; added {added:,} new records.")
+                indexed_count=db.indexed_package_count(fingerprint)
+                already_verified=bool(settings.expected_account_id and db.package_verified_for(settings.expected_account_id,fingerprint))
+                if already_verified:
+                    provenance_verified,provenance_reason=True,"unchanged package fingerprint is already bound to EXPECTED_ACCOUNT_ID"
+                else:
+                    provenance_verified,provenance_reason=package.ownership_evidence(settings.expected_account_id) if settings.expected_account_id else (False,"EXPECTED_ACCOUNT_ID is unset")
+                if indexed_count is None:
+                    found,added=db.import_records(package.records())
+                    db.register_package(fingerprint,settings.expected_account_id,False,found)
+                    console.print(f"Indexed {found:,} unique records; added {added:,} new records.")
+                else:
+                    console.print(f"Package unchanged and already indexed ({indexed_count:,} records); skipped full ZIP rescan.")
             console.print(f"Package provenance: {provenance_reason}")
+            show_startup_report(db,settings)
             asyncio.run(execute(settings, db, args, fingerprint,provenance_verified,provenance_reason)); show_stats(db); return 0
     except (PackageError, OSError, RuntimeError, sqlite3.Error) as exc:
         console.print(f"[red]Error:[/red] {exc}"); return 1

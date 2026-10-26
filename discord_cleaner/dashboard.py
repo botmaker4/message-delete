@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -34,6 +35,7 @@ class Dashboard:
     _last_reconcile: float = field(default=0.0, init=False)
     _cached_stats: dict[str, int] = field(default_factory=dict, init=False)
     _perf_checkpoint: dict[str, int] = field(default_factory=dict, init=False)
+    _report_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     def __enter__(self) -> "Dashboard":
         self._cached_stats = self.db.stats()
@@ -46,10 +48,17 @@ class Dashboard:
             self._live.__enter__()
         else:
             self._print_plain()
+            try: loop=asyncio.get_running_loop()
+            except RuntimeError: loop=None
+            if loop is not None: self._report_task=loop.create_task(self._report_periodically())
         return self
 
     def __exit__(self, *args: object) -> None:
         if self._live: self._live.__exit__(*args)
+        if self._report_task:
+            self._report_task.cancel()
+            self._report_task.add_done_callback(_consume_task_result)
+            self._print_plain()
 
     def update(self, *, item: object | None = None, status: str | None = None) -> None:
         if item:
@@ -59,7 +68,12 @@ class Dashboard:
         if self._live and now - self._last_render >= 0.5:
             self._last_render = now
             self._live.update(self.render())
-        elif not self._live and now - self._last_plain_update >= 15:
+        # Non-interactive output is emitted by an independent timer so long API
+        # waits and cooldowns still produce useful Coolify logs.
+
+    async def _report_periodically(self) -> None:
+        while True:
+            await asyncio.sleep(30)
             self._print_plain()
 
     def _metrics(self) -> tuple[dict[str, int], float, float]:
@@ -103,6 +117,7 @@ class Dashboard:
             f"requests/min={perf.requests_per_minute:.1f} deletes/min={perf.deletes_per_minute:.1f} "
             f"classified/min={perf.classifications_per_minute:.1f} "
             f"429={perf.http_429} 403={perf.http_403} 404={perf.http_404} "
+            f"requests={perf.api_requests} cooldown={self.pacer.cooldown_remaining:.1f}s "
             f"elapsed={_duration(elapsed)} api_eta={eta_text}",
             highlight=False,
         )
@@ -148,3 +163,8 @@ def _duration(seconds: float) -> str:
     if days: return f"{days}d {hours:02d}h {minutes:02d}m"
     if hours: return f"{hours}h {minutes:02d}m {seconds:02d}s"
     return f"{minutes}m {seconds:02d}s"
+
+
+def _consume_task_result(task: asyncio.Task[None]) -> None:
+    try: task.result()
+    except asyncio.CancelledError: pass

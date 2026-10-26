@@ -40,6 +40,7 @@ class Settings:
     max_retries: int
     verification_mode: str
     channel_batch_size: int
+    cleaner_mode: str
 
     @classmethod
     def load(cls, env_file: str | Path = ".env") -> "Settings":
@@ -53,6 +54,9 @@ class Settings:
             raise ValueError("MAX_CONCURRENT_DELETES cannot exceed the safety cap of 4")
         mode=os.getenv("VERIFICATION_MODE", "direct").strip().lower()
         if mode not in {"direct","fetch"}: raise ValueError("VERIFICATION_MODE must be direct or fetch")
+        cleaner_mode=os.getenv("CLEANER_MODE", "execute").strip().lower()
+        if cleaner_mode not in {"execute","diagnose","audit","recheck","stats"}:
+            raise ValueError("CLEANER_MODE must be execute, diagnose, audit, recheck, or stats")
         return cls(
             token=os.getenv("DISCORD_USER_TOKEN", "").strip(),
             expected_account_id=int(account) if account else None,
@@ -63,4 +67,5 @@ class Settings:
             max_retries=_positive_int("MAX_RETRIES", 5),
             verification_mode=mode,
             channel_batch_size=_positive_int("CHANNEL_BATCH_SIZE", 100),
+            cleaner_mode=cleaner_mode,
         )
