@@ -26,6 +26,18 @@ def test_filters(tmp_path):
         assert [x.channel_id for x in db.select_work(exclude_guilds={999999})] == [123456]
 
 
+def test_dm_only_workload_selection(tmp_path):
+    with ProgressDB(tmp_path/"dm-only.db") as db:
+        db.import_records([
+            ExportedMessage(123456,700001,"DM"),
+            ExportedMessage(234567,700002,"GROUP_DM"),
+            ExportedMessage(345678,700003,"GUILD_TEXT",999999),
+        ])
+        workloads=db.channel_workloads(channel_types={"DM"})
+        assert [(row.channel_id,row.channel_type) for row in workloads] == [(123456,"DM")]
+        assert db.stats(channel_types={"DM"})["pending"] == 1
+
+
 def test_channel_wide_inaccessible_is_bulk_and_resumable(tmp_path):
     with ProgressDB(tmp_path / "p.db") as db:
         db.import_records([ExportedMessage(123456, 700000 + n, "DM") for n in range(100)])

@@ -16,6 +16,10 @@ python main.py
 
 Normal operation scans the package, resumes SQLite progress, verifies the authenticated ID, and processes every pending matching row. There is no execute flag, limit, or confirmation prompt. Ctrl+C stops scheduling and flushes recorded results.
 
+## DM-only deletion policy
+
+Deletion is permanently restricted to package channels whose type is exactly `DM`. Group DMs, guild text channels, public/private threads, voice-channel text, and every other channel type remain indexed for diagnostics but are never selected for deletion. This is enforced both in the SQL scheduler and again inside the deletion worker, so CLI filters cannot expand the deletion scope. Dashboard progress and ETA are calculated from DM records only.
+
 ### Environment-controlled operation
 
 Coolify always starts the container with `python main.py`. Set `CLEANER_MODE` to choose the operation without changing that command:

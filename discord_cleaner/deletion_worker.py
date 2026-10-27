@@ -12,6 +12,7 @@ from .rate_limiter import AdaptivePacer
 
 log = logging.getLogger(__name__)
 DISCORD_OPERATION_ALLOWLIST = frozenset({"fetch_channel", "fetch_message", "delete"})
+DELETE_CHANNEL_TYPE_ALLOWLIST = frozenset({"DM"})
 
 
 class AuthenticationStopped(RuntimeError): pass
@@ -88,6 +89,9 @@ class DeletionRunner:
         return channel.get_partial_message(item.message_id)
 
     async def _process(self, item: WorkItem) -> None:
+        if item.channel_type not in DELETE_CHANNEL_TYPE_ALLOWLIST:
+            log.error("Safety policy refused deletion from non-DM channel %s (%s)",item.channel_id,item.channel_type)
+            return
         if self.dashboard: self.dashboard.update(item=item,status="Deleting")
         for attempt in range(1,self.max_retries+1):
             if self._stop.is_set(): return

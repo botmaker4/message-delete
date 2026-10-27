@@ -9,7 +9,7 @@ from discord_cleaner.metrics import PerformanceMetrics
 
 class DB:
     def __init__(self): self.calls=0
-    def stats(self):
+    def stats(self,channel_types=None):
         self.calls+=1
         return {"total":100_000,"pending":100_000,"deleted":0,"already_missing":0,
                 "inaccessible":0,"confirmed_inaccessible":0,"unverified_inaccessible":0,

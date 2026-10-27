@@ -22,6 +22,7 @@ class Dashboard:
     pacer: object
     concurrency: int = 1
     performance: PerformanceMetrics | None = None
+    scope_channel_types: set[str] | None = None
     started: float = field(default_factory=time.monotonic)
     channel_id: int | None = None
     channel_type: str = "-"
@@ -38,7 +39,7 @@ class Dashboard:
     _report_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     def __enter__(self) -> "Dashboard":
-        self._cached_stats = self.db.stats()
+        self._cached_stats = self.db.stats(channel_types=self.scope_channel_types)
         self.deleted_start = self._cached_stats["deleted"]
         self.pending_start = self._cached_stats["pending"]
         if self.performance is None: self.performance = PerformanceMetrics()
@@ -79,7 +80,7 @@ class Dashboard:
     def _metrics(self) -> tuple[dict[str, int], float, float]:
         now = time.monotonic()
         if not self._cached_stats or now - self._last_reconcile >= 5:
-            self._cached_stats = self.db.stats(); self._last_reconcile = now
+            self._cached_stats = self.db.stats(channel_types=self.scope_channel_types); self._last_reconcile = now
             self._perf_checkpoint = self._performance_counts()
         stats = dict(self._cached_stats)
         perf = self.performance or PerformanceMetrics()

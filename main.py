@@ -89,7 +89,7 @@ def show_diagnosis(db: ProgressDB) -> None:
 
 
 def show_startup_report(db: ProgressDB,settings: Settings)->None:
-    metrics=db.startup_metrics(); table=Table(title="Startup database report")
+    metrics=db.startup_metrics({"DM"}); table=Table(title="DM-only startup database report")
     table.add_column("Metric"); table.add_column("Value",justify="right")
     rows=(
         ("Total exported",metrics["total"]),("Successfully deleted",metrics["deleted"]),
@@ -132,9 +132,10 @@ async def execute(settings: Settings, db: ProgressDB, args: argparse.Namespace, 
     verify_self_library()
     if not settings.token: raise RuntimeError("DISCORD_USER_TOKEN is required")
     if settings.expected_account_id is None: raise RuntimeError("EXPECTED_ACCOUNT_ID is required")
-    workloads = db.channel_workloads(channel_id=args.channel_id, channel_types=args.channel_type,
+    workloads = db.channel_workloads(channel_id=args.channel_id, channel_types={"DM"},
                                      exclude_channels=args.exclude_channels, exclude_guilds=args.exclude_guilds)
     pending_count=sum(workload.pending_count for workload in workloads)
+    console.print("DM-only safety policy active: guild channels, threads, voice text, and group DMs are excluded.")
     if not pending_count:
         console.print("No pending messages match the filters."); return
     import discord  # imported only for an authenticated execution
@@ -163,7 +164,8 @@ async def execute(settings: Settings, db: ProgressDB, args: argparse.Namespace, 
                                 metrics=metrics)
         label = f"{client.user} ({client.user.id})"
         console.print(f"Authenticated as {label}. Starting {pending_count:,} pending records in {len(workloads):,} channels ({settings.verification_mode} mode).")
-        dashboard = Dashboard(db, "EXECUTE", label, settings.delete_delay, runner.pacer, settings.max_concurrent,metrics)
+        dashboard = Dashboard(db, "EXECUTE - DM ONLY", label, settings.delete_delay, runner.pacer,
+                              settings.max_concurrent,metrics,{"DM"})
         runner.dashboard = dashboard
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -171,7 +173,7 @@ async def execute(settings: Settings, db: ProgressDB, args: argparse.Namespace, 
             except (NotImplementedError, RuntimeError): pass
         try:
             with dashboard:
-                await runner.run_scheduled(channel_id=args.channel_id,channel_types=args.channel_type,
+                await runner.run_scheduled(channel_id=args.channel_id,channel_types={"DM"},
                                            exclude_channels=args.exclude_channels,exclude_guilds=args.exclude_guilds)
         except AuthenticationStopped as exc:
             console.print(f"Authentication stopped: {exc}")

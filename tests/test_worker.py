@@ -109,6 +109,18 @@ async def test_direct_mode_uses_one_delete_without_fetch():
     assert runner.metrics.api_requests == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_type",["GROUP_DM","GUILD_TEXT","PUBLIC_THREAD","PRIVATE_THREAD","GUILD_VOICE"])
+async def test_non_dm_channel_types_are_never_deleted(channel_type):
+    message=Message(); channel=Channel(message); db=DB()
+    candidate=WorkItem(123456,777777,channel_type,None,0)
+    runner=DeletionRunner(Client(channel),db,account_id=42,delay=0,max_retries=1,concurrency=1,verification_mode="direct")
+    await runner.run([candidate])
+    assert message.deleted == 0
+    assert runner.metrics.api_requests == 0
+    assert db.rows == []
+
+
 def test_no_unrelated_destructive_calls_exist():
     import pathlib
     source="\n".join(p.read_text(encoding="utf-8") for p in pathlib.Path("discord_cleaner").glob("*.py"))

@@ -106,11 +106,14 @@ class ProgressDB:
         actual=self.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         return int(row[0]) if actual>=int(row[0]) else None
 
-    def startup_metrics(self)->dict[str,float|int]:
-        stats=self.stats()
-        recent_5=self.connection.execute("SELECT COUNT(*) FROM messages WHERE status='deleted' AND julianday(deleted_at)>=julianday('now','-5 minutes')").fetchone()[0]
-        recent_30=self.connection.execute("SELECT COUNT(*) FROM messages WHERE status='deleted' AND julianday(deleted_at)>=julianday('now','-30 minutes')").fetchone()[0]
-        recorded_429=self.connection.execute("SELECT COUNT(*) FROM messages WHERE http_status=429").fetchone()[0]
+    def startup_metrics(self,channel_types:set[str]|None=None)->dict[str,float|int]:
+        stats=self.stats(channel_types=channel_types)
+        type_sql=""; params=[]
+        if channel_types:
+            type_sql=f" AND channel_type IN ({','.join('?'*len(channel_types))})"; params=sorted(channel_types)
+        recent_5=self.connection.execute("SELECT COUNT(*) FROM messages WHERE status='deleted' AND julianday(deleted_at)>=julianday('now','-5 minutes')"+type_sql,params).fetchone()[0]
+        recent_30=self.connection.execute("SELECT COUNT(*) FROM messages WHERE status='deleted' AND julianday(deleted_at)>=julianday('now','-30 minutes')"+type_sql,params).fetchone()[0]
+        recorded_429=self.connection.execute("SELECT COUNT(*) FROM messages WHERE http_status=429"+type_sql,params).fetchone()[0]
         return {**stats,"recent_5m_per_min":recent_5/5,"recent_30m_per_min":recent_30/30,"recorded_429":recorded_429}
 
     def _filters(self,channel_id,channel_types,exclude_channels,exclude_guilds,alias="m."):
@@ -177,15 +180,21 @@ class ProgressDB:
             WHERE status='inaccessible' AND classification_source='historical_unverified' AND channel_id IN
             (SELECT channel_id FROM channels WHERE accessibility_status='accessible')"""); self.connection.commit(); self.commit_count+=1; return cursor.rowcount
 
-    def stats(self)->dict[str,int]:
+    def stats(self,channel_types:set[str]|None=None)->dict[str,int]:
         result={status:0 for status in STATUSES}
-        for row in self.connection.execute("SELECT status,COUNT(*) n FROM messages GROUP BY status"): result[row["status"]]=row["n"]
+        where=""; params=[]
+        if channel_types:
+            where=f" WHERE channel_type IN ({','.join('?'*len(channel_types))})"; params=sorted(channel_types)
+        for row in self.connection.execute("SELECT status,COUNT(*) n FROM messages"+where+" GROUP BY status",params): result[row["status"]]=row["n"]
         result["total"]=sum(result.values()); result["remaining"]=result["pending"]+result["failed"]
-        result["unverified_inaccessible"]=self.connection.execute("SELECT COUNT(*) FROM messages WHERE status='inaccessible' AND classification_source='historical_unverified'").fetchone()[0]
+        conjunction=" AND " if where else " WHERE "
+        result["unverified_inaccessible"]=self.connection.execute("SELECT COUNT(*) FROM messages"+where+conjunction+"status='inaccessible' AND classification_source='historical_unverified'",params).fetchone()[0]
         result["confirmed_inaccessible"]=result["inaccessible"]-result["unverified_inaccessible"]
+        channel_filter=""
+        if channel_types: channel_filter=f" WHERE c.channel_type IN ({','.join('?'*len(channel_types))})"
         channel_row=self.connection.execute("""SELECT COUNT(*) total,
             SUM(NOT EXISTS(SELECT 1 FROM messages m WHERE m.channel_id=c.channel_id AND m.status='pending')) completed,
-            SUM(EXISTS(SELECT 1 FROM messages m WHERE m.channel_id=c.channel_id AND m.status='pending')) active FROM channels c""").fetchone()
+            SUM(EXISTS(SELECT 1 FROM messages m WHERE m.channel_id=c.channel_id AND m.status='pending')) active FROM channels c"""+channel_filter,params).fetchone()
         result["channels_total"]=int(channel_row["total"] or 0); result["channels_completed"]=int(channel_row["completed"] or 0); result["active_channels"]=int(channel_row["active"] or 0)
         return result
     def channel_stats(self,channel_id:int)->tuple[int,int]:
